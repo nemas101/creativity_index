@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from unidecode import unidecode
 from sacremoses import MosesDetokenizer
 from transformers import AutoTokenizer
+from infini_gram.engine import InfiniGramEngine
 
 md = MosesDetokenizer(lang='en')
 API_URL = 'https://api.infini-gram.io/'
@@ -22,7 +23,7 @@ tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-hf", token=HF_T
 @dataclass
 class Document:
     doc_id: str
-    tokens: List[str]  # [num_tokens]
+    tokens: list[str]  # [num_tokens]
 
 
 @dataclass
@@ -90,20 +91,26 @@ class Hypothesis:
         }
 
 
-def find_exact_match(detokenize: Callable, doc: Document, min_ngram: int):
+def find_exact_match(detokenize: Callable, doc: Document, min_ngram: int, ref_corpus: str):
     hypothesis = Hypothesis(doc, min_ngram)
 
     first_pointer, second_pointer = 0, min_ngram
     while second_pointer <= len(doc.tokens):
         span_text = detokenize(doc.tokens[first_pointer: second_pointer])
-        request_data = {
-            'corpus': 'v4_rpj_llama_s4',
-            'engine': 'c++',
-            'query_type': 'count',
-            'query': span_text,
-        }
-        time.sleep(0.1)
-        search_result = requests.post(API_URL, json=request_data).json()
+        if ref_corpus == "v4_rpj_llama_s4":
+            request_data = {
+                'corpus': 'v4_rpj_llama_s4',
+                'engine': 'c++',
+                'query_type': 'count',
+                'query': span_text,
+            }
+            time.sleep(0.6)
+            search_result = requests.post(API_URL, json=request_data).json()
+        else:
+            tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-hf", add_bos_token=False, add_eos_token=False)
+            engine = InfiniGramEngine(index_dir=f"data/index/ready/{ref_corpus}", eos_token_id=tokenizer.eos_token_id)
+            input_ids = tokenizer.encode(span_text)
+            search_result = engine.count(input_ids)
         occurrence = 0 if 'count' not in search_result else search_result['count']
 
         if occurrence:
@@ -123,7 +130,7 @@ def find_exact_match(detokenize: Callable, doc: Document, min_ngram: int):
 
             print("***************************************************************************************************")
             print(hypothesis.format_span())
-            print(f'score: {hypothesis.get_score():.4f}  avg_span_length: {hypothesis.get_avg_span_len()}')
+            print(f'occurence: {occurrence}, score: {hypothesis.get_score():.4f}  avg_span_length: {hypothesis.get_avg_span_len()}')
             print("***************************************************************************************************")
 
         else:
@@ -139,7 +146,7 @@ def find_exact_match(detokenize: Callable, doc: Document, min_ngram: int):
     return hypothesis.export_json()
 
 
-def dj_search(data_path, output_file, min_ngram, subset=100, lm_tokenizer=False):
+def dj_search(data_path, output_file, min_ngram, subset=100, lm_tokenizer=False, ref_corpus="v4_rpj_llama_s4"):
     data = json.load(open(data_path))[:subset]
     if not lm_tokenizer:
         tokenize_func = lambda x: nltk.tokenize.casual.casual_tokenize(x)
@@ -160,7 +167,9 @@ def dj_search(data_path, output_file, min_ngram, subset=100, lm_tokenizer=False)
         if len(tgt_doc.tokens) <= min_ngram:
             continue
 
-        output = find_exact_match(detokenize, tgt_doc, min_ngram)
+        output = find_exact_match(detokenize, tgt_doc, min_ngram, ref_corpus)
+
+        print(output)
         t_doc.update(output)
         outputs.append(t_doc)
 
@@ -171,7 +180,7 @@ def dj_search(data_path, output_file, min_ngram, subset=100, lm_tokenizer=False)
 
         with open(output_file, 'w') as f:
             json.dump(outputs, f, indent=4)
-            f.flush()
+            # f.flush()
 
 
 def main():
@@ -181,18 +190,21 @@ def main():
     parser.add_argument('--data', type=str,
                         default='data/book/GPT3_book.json')
     parser.add_argument('--output_dir', type=str,
-                        default=f'outputs/exact/book')
+                        default=f'outputs/exact/book',
+                        help = "default is outputs/exact/book")
     parser.add_argument("--min_ngram", type=int, default=5,
                         help="minimum n-gram size")
     parser.add_argument("--subset", type=int, default=100,
                         help="size of example subset to run search on")
     parser.add_argument('--lm_tokenizer', action='store_true',
                         help='whether to LM tokenizer instead of whitespace tokenizer')
+    parser.add_argument('--ref_corpus', type=str, default="v4_rpj_llama_s4",
+                        help="either online corpus name for infinigram api (default = v4_rpj_llama_s4) or name of domain reference corpus")
 
     args = parser.parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
     args.output_file = os.path.join(args.output_dir, args.task + '.json')
-    dj_search(args.data, args.output_file, args.min_ngram, args.subset, args.lm_tokenizer)
+    dj_search(args.data, args.output_file, args.min_ngram, args.subset, args.lm_tokenizer, args.ref_corpus)
 
 
 if __name__ == '__main__':
